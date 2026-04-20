@@ -3,7 +3,6 @@ const cors    = require('cors');
 const app     = express();
 const PORT    = process.env.PORT || 3000;
 
-// Force a security bypass so your browser never blocks the connection
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -30,7 +29,7 @@ function durMins(str) {
   if (hm) return parseInt(hm[1]) * 60 + parseInt(hm[2]);
   const h = str.match(/(\d+)h/); if (h) return parseInt(h[1]) * 60;
   const m = str.match(/(\d+)m/); if (m) return parseInt(m[1]);
-  return 0;
+  return 120; // Default 2 hours
 }
 
 function minsToTime(mins) {
@@ -43,62 +42,91 @@ function slugify(s, i) {
   return s.toLowerCase().replace(/[^a-z0-9]+/g,'-') + '-' + i;
 }
 
-// ── Enhanced Scraper ─────────────────────────────────────────────────────────
+// ── The Deep Scraper ─────────────────────────────────────────────────────────
 async function scrapeShowtimes() {
   const { default: fetch } = await import('node-fetch');
   const { load } = await import('cheerio');
 
   try {
-    console.log("Fetching: https://www.baycitycinemas.com/");
     const res = await fetch('https://www.baycitycinemas.com/', {
       headers: { 
-        // These headers make the server look like a real Chrome browser
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-        'Cache-Control': 'no-cache'
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Referer': 'https://www.google.com/',
+        'DNT': '1'
       },
       timeout: 30000 
     });
 
-    if (!res.ok) throw new Error('Site returned ' + res.status);
+    if (!res.ok) throw new Error('Site Blocked: ' + res.status);
     
     const html = await res.text();
     const $    = load(html);
     const showtimes = [];
     let idx = 0;
 
-    // We search for titles in h3, h2, or movie-title classes
-    $('h3, h2, .movie-title, .title').each((_, el) => {
-      const title = $(el).text().trim();
-      // Ignore titles that are too short or just "Coming Soon"
-      if (!title || title.length < 2 || title.toLowerCase().includes('coming soon')) return;
+    // STRATEGY A: Check for standard movie blocks
+    const items = $('.movie-list-item, .movie-container, .film-item, article, .movie-card');
+    
+    if (items.length > 0) {
+        items.each((_, el) => {
+            const title = $(el).find('h2, h3, .title, .movie-title').first().text().trim();
+            if (!title || title.length < 2) return;
 
-      const block = $(el).closest('div, section, article, li').first();
-      const text  = block.text();
+            const text = $(el).text();
+            const timeRx = /\b(\d{1,2}:\d{2}\s*[ap]m?)\b/gi;
+            const times = [...new Set((text.match(timeRx) || []).map(t => t.replace(/\s/g,'').toLowerCase()))];
 
-      // Find all times like 1:00pm, 4:20p, etc.
-      const timeRx = /\b(\d{1,2}:\d{2}\s*[ap]m?)\b/gi;
-      const times  = [...new Set((text.match(timeRx) || []).map(t => t.replace(/\s/g,'').toLowerCase()))];
+            const durMatch = text.match(/(\d+)h\s*(\d+)m/);
+            const runtime = durMins(durMatch ? durMatch[0] : '2h 0m');
 
-      if (times.length === 0) return;
-
-      const durM  = text.match(/(\d+)h\s*(\d+)m/);
-      const runtime = durMins(durM ? durM[0] : '2h 00m');
-
-      times.forEach(t => {
-        const exitMins = timeMins(t) + runtime + 15;
-        showtimes.push({
-          movieId: slugify(title, idx++),
-          movie: title,
-          rating: (text.match(/\b(NR|G|PG-13|PG|R)\b/) || ['','NR'])[1],
-          theater: title.includes('GDX') ? 'GDX' : 'General',
-          startTime: t,
-          endTime: minsToTime(exitMins),
-          endMins: exitMins
+            times.forEach(t => {
+                const exitMins = timeMins(t) + runtime + 15;
+                showtimes.push({
+                    movieId: slugify(title, idx++),
+                    movie: title,
+                    rating: (text.match(/\b(NR|G|PG-13|PG|R)\b/) || ['','NR'])[1],
+                    theater: title.includes('GDX') ? 'GDX' : 'General',
+                    startTime: t,
+                    endTime: minsToTime(exitMins),
+                    endMins: exitMins
+                });
+            });
         });
-      });
-    });
+    }
+
+    // STRATEGY B: Fallback - Scan every single text node for times if Strategy A failed
+    if (showtimes.length === 0) {
+        $('div, p, span, li').each((_, el) => {
+            const text = $(el).text();
+            if (text.length > 500) return; // Skip massive blocks
+
+            const timeRx = /\b(\d{1,2}:\d{2}\s*[ap]m?)\b/gi;
+            const foundTimes = text.match(timeRx);
+            
+            if (foundTimes) {
+                // Look "upwards" for the nearest title
+                const title = $(el).prevAll('h1, h2, h3, h4').first().text().trim() || 
+                              $(el).closest('div').find('h2, h3, h4').first().text().trim();
+                
+                if (title && title.length > 2) {
+                    foundTimes.forEach(t => {
+                        const cleanTime = t.replace(/\s/g,'').toLowerCase();
+                        showtimes.push({
+                            movieId: slugify(title, idx++),
+                            movie: title,
+                            rating: 'NR',
+                            theater: 'General',
+                            startTime: cleanTime,
+                            endTime: minsToTime(timeMins(cleanTime) + 135), // Default 2hr 15min
+                            endMins: timeMins(cleanTime) + 135
+                        });
+                    });
+                }
+            }
+        });
+    }
 
     return showtimes.sort((a, b) => a.endMins - b.endMins);
   } catch (err) {
@@ -107,22 +135,21 @@ async function scrapeShowtimes() {
   }
 }
 
-// ── Cache & Deployment ───────────────────────────────────────────────────────
+// ── Cache Logic ─────────────────────────────────────────────────────────────
 let cache = { date: '', showtimes: [] };
 
 async function refreshCache() {
   const data = await scrapeShowtimes();
-  if (data.length > 0) {
+  if (data && data.length > 0) {
     cache = { 
       date: new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric' }), 
       showtimes: data 
     };
-    console.log(`Updated cache with ${data.length} movies.`);
   }
 }
 
 refreshCache();
-setInterval(refreshCache, 20 * 60 * 1000); // Refresh every 20 mins
+setInterval(refreshCache, 20 * 60 * 1000); 
 
 app.get('/showtimes', (req, res) => {
   res.json({ ok: true, date: cache.date, showtimes: cache.showtimes });
@@ -131,7 +158,7 @@ app.get('/showtimes', (req, res) => {
 app.get('/health', (req, res) => res.json({ ok: true }));
 
 app.get('/', (req, res) => {
-  res.send(`<h1>API Status: Online</h1><p>Movies in cache: ${cache.showtimes.length}</p>`);
+  res.send(`<h1>API Status: Online</h1><p>Movies in cache: ${cache.showtimes.length}</p><p>Latest update: ${cache.date}</p>`);
 });
 
-app.listen(PORT, () => console.log('Server live on port ' + PORT));
+app.listen(PORT, () => console.log('Server live'));
