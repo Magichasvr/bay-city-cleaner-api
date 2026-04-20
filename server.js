@@ -7,6 +7,9 @@ const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 
+// Helper to wait between "clicks" so the theater doesn't block us
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
 function timeMins(str) {
     str = str.trim().toLowerCase().replace('am', 'a').replace('pm', 'p');
     const pm = str.endsWith('p');
@@ -31,75 +34,74 @@ async function scrapeShowtimes() {
 
     try {
         const response = await axios.get('https://www.baycitycinemas.com/', {
-            headers: { 'User-Agent': 'Mozilla/5.0' },
+            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
             timeout: 15000
         });
 
         const $ = cheerio.load(response.data);
+        const ticketTasks = [];
 
-        // 1. Find all movie blocks
-        const movieBlocks = $('div, section, article, .movie-container').toArray();
-
-        for (const block of movieBlocks) {
+        $('div, section, article, .movie-container').each((_, block) => {
             const $block = $(block);
             let title = $block.find('h1, h2, h3, .movie-title, .title').first().text().trim();
             
-            // Filter Junk
-            if (!title || title.length < 5) continue;
+            // Hard block for the banner
+            if (!title || title.length < 5) return;
             const lowTitle = title.toLowerCase();
-            if (lowTitle.includes("bay city cinemas") || lowTitle.includes("mystery") || lowTitle === "movies") continue;
+            if (lowTitle.includes("bay city cinemas") || lowTitle === "movies") return;
 
-            // 2. Find Ticket Links in this block
-            const ticketLinks = $block.find('a[href*="/tickets/"]');
-
-            for (let i = 0; i < ticketLinks.length; i++) {
-                const linkEl = $(ticketLinks[i]);
-                const timeText = linkEl.text().trim();
+            // Find ticket links within this specific movie block
+            $block.find('a[href*="/tickets/"]').each((__, link) => {
+                const $link = $(link);
+                const timeText = $link.text().trim();
                 const timeMatch = timeText.match(/\b(\d{1,2}:\d{2}\s*[ap]m?)\b/i);
 
                 if (timeMatch) {
                     const t = timeMatch[1].replace(/\s/g, '').toLowerCase();
-                    let ticketUrl = linkEl.attr('href');
+                    let ticketUrl = $link.attr('href');
                     if (ticketUrl.startsWith('/')) ticketUrl = 'https://www.baycitycinemas.com' + ticketUrl;
-
-                    try {
-                        // 3. VISIT THE TICKET PAGE FOR THE AUDITORIUM
-                        const ticketPage = await axios.get(ticketUrl, { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 5000 });
-                        const $tix = cheerio.load(ticketPage.data);
-                        
-                        // Look for "Auditorium X" or "Theater X"
-                        let aud = "Standard";
-                        const pageText = $tix('body').text();
-                        const audMatch = pageText.match(/Auditorium\s*(\d+)/i) || pageText.match(/Theater\s*(\d+)/i);
-                        
-                        if (audMatch) {
-                            aud = `Aud ${audMatch[1]}`;
-                        } else if (lowTitle.includes('gdx')) {
-                            aud = "GDX";
-                        }
-
-                        const cleanTitle = title.replace(/gdx/gi, '').trim();
-                        const fingerprint = `${cleanTitle.toLowerCase()}|${t}`;
-
-                        if (!seen.has(fingerprint)) {
-                            seen.add(fingerprint);
-                            const start = timeMins(t);
-                            showtimes.push({
-                                movieId: cleanTitle.toLowerCase().replace(/[^a-z]/g,'') + '-' + start,
-                                movie: cleanTitle,
-                                theater: lowTitle.includes('gdx') ? 'GDX' : 'General',
-                                auditorium: aud, 
-                                startTime: t,
-                                endTime: minsToTime(start + 135),
-                                endMins: start + 135
-                            });
-                        }
-                    } catch (err) {
-                        // If ticket page fails, just skip auditorium
-                        continue;
-                    }
+                    
+                    ticketTasks.push({ title, t, ticketUrl, lowTitle });
                 }
-            }
+            });
+        });
+
+        // Visit each ticket page one-by-one with a tiny delay
+        for (const task of ticketTasks) {
+            try {
+                // Wait 300ms between requests to avoid being blocked
+                await sleep(300); 
+                
+                const tixRes = await axios.get(task.ticketUrl, { 
+                    headers: { 'User-Agent': 'Mozilla/5.0' },
+                    timeout: 6000 
+                });
+                const $tix = cheerio.load(tixRes.data);
+                const pageText = $tix('body').text();
+                
+                // Hunt for "Auditorium X"
+                const audMatch = pageText.match(/Auditorium\s*(\d+)/i) || pageText.match(/Theater\s*(\d+)/i);
+                let aud = audMatch ? `Aud ${audMatch[1]}` : "Std";
+                
+                if (task.lowTitle.includes('gdx')) aud = "GDX";
+
+                const cleanTitle = task.title.replace(/gdx/gi, '').trim();
+                const fingerprint = `${cleanTitle.toLowerCase()}|${task.t}`;
+
+                if (!seen.has(fingerprint)) {
+                    seen.add(fingerprint);
+                    const start = timeMins(task.t);
+                    showtimes.push({
+                        movieId: cleanTitle.toLowerCase().replace(/[^a-z]/g,'') + '-' + start,
+                        movie: cleanTitle,
+                        theater: task.lowTitle.includes('gdx') ? 'GDX' : 'General',
+                        auditorium: aud, 
+                        startTime: task.t,
+                        endTime: minsToTime(start + 135),
+                        endMins: start + 135
+                    });
+                }
+            } catch (e) { continue; }
         }
 
         return showtimes.sort((a, b) => a.endMins - b.endMins);
@@ -118,5 +120,5 @@ refresh();
 setInterval(refresh, 20 * 60 * 1000);
 
 app.get('/showtimes', (req, res) => res.json({ ok: true, ...cache }));
-app.get('/', (req, res) => res.send(`Online: ${cache.showtimes.length} movies with deep-scanned auditoriums.`));
+app.get('/', (req, res) => res.send(`Online: ${cache.showtimes.length} movies with Auditorium numbers.`));
 app.listen(PORT);
