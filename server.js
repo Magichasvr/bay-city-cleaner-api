@@ -26,7 +26,7 @@ function minsToTime(mins) {
 
 async function scrapeShowtimes() {
     const showtimes = [];
-    const seen = new Set();
+    const seen = new Set(); // This is the duplicate killer
     const todayName = new Date().toLocaleDateString('en-US', { weekday: 'long' });
 
     try {
@@ -36,17 +36,16 @@ async function scrapeShowtimes() {
         });
 
         const $ = cheerio.load(response.data);
-
-        // Map out the movies first so we don't have an empty screen
         const blocks = $('div, section, article, .movie-container').toArray();
 
         for (const block of blocks) {
             const $block = $(block);
             let title = $block.find('h1, h2, h3, .movie-title, .title').first().text().trim();
             
-            // Filter Junk
             if (!title || title.length < 5) continue;
             const lowTitle = title.toLowerCase();
+            
+            // Filter Junk & Banners
             if (lowTitle.includes("bay city cinemas") || lowTitle.includes("mystery") || lowTitle === "movies") continue;
 
             const timeRx = /\b(\d{1,2}:\d{2}\s*[ap]m?)\b/gi;
@@ -59,11 +58,16 @@ async function scrapeShowtimes() {
                     const cleanTitle = title.replace(/gdx/gi, '').trim();
                     const start = timeMins(t);
                     
-                    // AUDITORIUM LOGIC: Look for a link in this block that matches this time
-                    const ticketLink = $block.find(`a:contains("${t}"), a:contains("${t.toUpperCase()}")`).attr('href');
-                    let aud = "Scanning..."; // Placeholder while background scan happens
+                    // Create a unique fingerprint for this specific showtime
+                    // Format: "Movie Name | 7:00pm"
+                    const fingerprint = `${cleanTitle.toLowerCase()}|${t}`;
 
-                    if (lowTitle.includes('gdx')) aud = "GDX";
+                    // --- THE DUPLICATE CHECK ---
+                    if (seen.has(fingerprint)) continue; 
+                    seen.add(fingerprint);
+
+                    const ticketLink = $block.find(`a:contains("${t}"), a:contains("${t.toUpperCase()}")`).attr('href');
+                    let aud = lowTitle.includes('gdx') ? "GDX" : "Scanning...";
 
                     showtimes.push({
                         movieId: cleanTitle.toLowerCase().replace(/[^a-z]/g,'') + '-' + start,
@@ -79,17 +83,17 @@ async function scrapeShowtimes() {
             }
         }
 
-        // BACKGROUND SCAN: Try to grab numbers for the first 10 movies quickly
-        // We limit this so the server doesn't crash/timeout
         const sorted = showtimes.sort((a, b) => a.endMins - b.endMins);
         
-        for (let i = 0; i < Math.min(sorted.length, 12); i++) {
+        // Scan Auditoriums for the next few movies
+        for (let i = 0; i < Math.min(sorted.length, 15); i++) {
             if (sorted[i].ticketUrl && sorted[i].auditorium === "Scanning...") {
                 try {
                     const tixRes = await axios.get(sorted[i].ticketUrl, { timeout: 3000 });
                     const $tix = cheerio.load(tixRes.data);
                     const audMatch = $tix('body').text().match(/(?:Auditorium|Theater)\s*(\d+)/i);
                     if (audMatch) sorted[i].auditorium = "Aud " + audMatch[1];
+                    else sorted[i].auditorium = "Std";
                 } catch (e) {
                     sorted[i].auditorium = "Std";
                 }
@@ -112,5 +116,5 @@ refresh();
 setInterval(refresh, 15 * 60 * 1000);
 
 app.get('/showtimes', (req, res) => res.json({ ok: true, ...cache }));
-app.get('/', (req, res) => res.send(`Live: ${cache.showtimes.length} movies.`));
+app.get('/', (req, res) => res.send(`Live: ${cache.showtimes.length} unique movies loaded.`));
 app.listen(PORT);
