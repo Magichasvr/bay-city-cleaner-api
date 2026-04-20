@@ -3,20 +3,17 @@ const cors    = require('cors');
 const app     = express();
 const PORT    = process.env.PORT || 3000;
 
-// FORCED SECURITY BYPASS
+// Security Bypass for the Browser
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(200);
-  }
+  if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
 });
-
 app.use(cors());
 
-// ── TIME HELPERS ─────────────────────────────────────────────────────────────
+// ── Time Helpers ─────────────────────────────────────────────────────────────
 function timeMins(str) {
   str = str.trim().toLowerCase().replace('am','a').replace('pm','p');
   const pm = str.endsWith('p');
@@ -46,33 +43,52 @@ function slugify(s, i) {
   return s.toLowerCase().replace(/[^a-z0-9]+/g,'-') + '-' + i;
 }
 
-// ── SCRAPER ───────────────────────────────────────────────────────────────────
+// ── NEW & IMPROVED SCRAPER ───────────────────────────────────────────────────
 async function scrapeShowtimes() {
   const { default: fetch } = await import('node-fetch');
   const { load } = await import('cheerio');
 
   try {
+    console.log("Accessing baycitycinemas.com...");
     const res = await fetch('https://www.baycitycinemas.com/', {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+      headers: { 
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5'
+      },
       timeout: 30000 
     });
+
+    if (!res.ok) throw new Error('Theater site status: ' + res.status);
+    
     const html = await res.text();
     const $    = load(html);
     const showtimes = [];
     let idx = 0;
 
-    $('h3, .movie-title, h2').each((_, el) => {
+    // Search for movies using multiple possible selectors
+    const movieBlocks = $('h3, .movie-title, .title, h2, .movie-list-item');
+
+    movieBlocks.each((_, el) => {
       const title = $(el).text().trim();
-      if (!title || title.length < 2) return;
+      if (!title || title.length < 2 || title.toLowerCase().includes('coming soon')) return;
+
+      // Find the text block containing the times and duration
       const block = $(el).closest('div, section, article, li').first();
       const text  = block.text();
-      const durM  = text.match(/(\d+)h\s*(\d+)m/);
-      const runtime = durMins(durM ? durM[0] : '2h 00m');
+
+      // Extract times (e.g. 1:45pm)
       const timeRx = /\b(\d{1,2}:\d{2}\s*[ap]m?)\b/gi;
       const times  = [...new Set((text.match(timeRx) || []).map(t => t.replace(/\s/g,'').toLowerCase()))];
 
+      if (times.length === 0) return;
+
+      // Extract duration (default to 2h if not found)
+      const durM  = text.match(/(\d+)h\s*(\d+)m/);
+      const runtime = durMins(durM ? durM[0] : '2h 00m');
+
       times.forEach(t => {
-        const exitMins = timeMins(t) + runtime + 15;
+        const exitMins = timeMins(t) + runtime + 15; // 15 min cleaning buffer
         showtimes.push({
           movieId: slugify(title, idx++),
           movie: title,
@@ -84,19 +100,27 @@ async function scrapeShowtimes() {
         });
       });
     });
+
     return showtimes.sort((a, b) => a.endMins - b.endMins);
   } catch (err) {
+    console.error('Scraper Error:', err.message);
     return [];
   }
 }
 
-// ── CACHE & ROUTES ────────────────────────────────────────────────────────────
+// ── Cache & Routes ────────────────────────────────────────────────────────────
 let cache = { date: '', showtimes: [] };
 
 async function refreshCache() {
   const data = await scrapeShowtimes();
-  if (data.length > 0) {
-    cache = { date: new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric' }), showtimes: data };
+  if (data && data.length > 0) {
+    cache = { 
+      date: new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric' }), 
+      showtimes: data 
+    };
+    console.log(`Success: Found ${data.length} showtimes.`);
+  } else {
+    console.log("No showtimes found in this scrape attempt.");
   }
 }
 
@@ -104,11 +128,10 @@ refreshCache();
 setInterval(refreshCache, 15 * 60 * 1000); 
 
 app.get('/showtimes', (req, res) => {
-  res.setHeader('Content-Type', 'application/json');
   res.json({ ok: true, date: cache.date, showtimes: cache.showtimes });
 });
 
 app.get('/health', (req, res) => res.json({ ok: true }));
-app.get('/', (req, res) => res.send('API Active'));
+app.get('/', (req, res) => res.send('API Active. GET /showtimes for data.'));
 
-app.listen(PORT, () => console.log('Server live'));
+app.listen(PORT, () => console.log('Server is running on port ' + PORT));
