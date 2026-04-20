@@ -41,14 +41,21 @@ async function scrapeShowtimes() {
             const $block = $(block);
             let title = $block.find('h1, h2, h3, .movie-title, .title').first().text().trim();
             
-            // Block the giant site header banner only
+            // --- THE CLEANUP FILTER ---
             if (!title || title.length < 5) return;
+            
             const lowTitle = title.toLowerCase();
-            if (lowTitle === "movies at bay city cinemas" || lowTitle === "bay city cinemas") return;
+            
+            // This specifically kills the banner and the mystery movie
+            if (lowTitle.includes("movies at bay city cinemas") || 
+                lowTitle.includes("bay city cinemas") || 
+                lowTitle.includes("mystery movie monday")) {
+                return; 
+            }
 
             const blockText = $block.text();
             
-            // Date Filter: Only show today's movies
+            // Date Filter: Only today's movies
             const otherDays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].filter(d => d !== todayName);
             if (otherDays.some(day => blockText.includes(day)) && !blockText.includes('Today')) return;
 
