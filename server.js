@@ -41,14 +41,11 @@ async function scrapeShowtimes() {
             const $block = $(block);
             let title = $block.find('h1, h2, h3, .movie-title, .title').first().text().trim();
             
-            // 1. THE NUCLEAR BANNER BLOCK
+            // 1. BLOCK ONLY THE HEADER BANNER
             if (!title || title.length < 5) return;
             const lowTitle = title.toLowerCase();
-            // Block anything that looks like a page header or generic info
-            if (lowTitle.includes("bay city cinemas") || 
-                lowTitle.includes("mystery") || 
-                lowTitle.includes("trailers") || 
-                lowTitle === "movies") return;
+            // We allow "Mystery Movie Monday" but block the site title banner
+            if (lowTitle === "movies at bay city cinemas" || lowTitle === "bay city cinemas") return;
 
             const blockText = $block.text();
             
@@ -67,14 +64,9 @@ async function scrapeShowtimes() {
                     const isGDX = lowTitle.includes('gdx') || blockText.toLowerCase().includes('gdx');
                     const type = isGDX ? 'GDX' : (lowTitle.includes('mummy') ? 'Flashback' : 'General');
                     
-                    // 4. AUDITORIUM LOGIC
-                    // We check for attributes or data-tags usually found in the ticket buttons
-                    let aud = "Check Ticket"; 
-                    const dataAttr = $block.find('a, button').attr('data-auditorium') || 
-                                    $block.find('a, button').attr('data-theater');
-                    
-                    if (dataAttr) aud = `Aud ${dataAttr}`;
-                    else if (isGDX) aud = "Aud GDX"; // GDX is usually its own specific room
+                    // 4. AUDITORIUM LOGIC (Since they are hidden inside ticket links)
+                    let aud = "See Ticket"; 
+                    if (isGDX) aud = "GDX Room"; 
 
                     const cleanTitle = title.replace(/gdx/gi, '').trim();
                     const fingerprint = `${cleanTitle.toLowerCase()}|${t}|${type}`;
@@ -86,7 +78,7 @@ async function scrapeShowtimes() {
                             movieId: cleanTitle.toLowerCase().replace(/[^a-z]/g,'') + '-' + start,
                             movie: cleanTitle,
                             theater: type,
-                            auditorium: aud, // Will show "Aud #" or "Check Ticket"
+                            auditorium: aud, 
                             startTime: t,
                             endTime: minsToTime(start + 135),
                             endMins: start + 135
