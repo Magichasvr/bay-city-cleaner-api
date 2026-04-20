@@ -27,10 +27,10 @@ function minsToTime(mins) {
 async function scrapeShowtimes() {
     const showtimes = [];
     const seen = new Set();
-    
-    // Get current time in minutes to hide old movies
-    const now = new Date();
-    const currentMins = (now.getHours() * 60) + now.getMinutes();
+    const todayName = new Date().toLocaleDateString('en-US', { weekday: 'long' });
+
+    // --- NEW: THE BLOCKLIST ---
+    const junkText = ["showtimes", "trailers", "coming soon", "bay city cinemas", "theater info"];
 
     try {
         const response = await axios.get('https://www.baycitycinemas.com/', {
@@ -43,12 +43,17 @@ async function scrapeShowtimes() {
 
         $('div, section, article').each((_, block) => {
             const $block = $(block);
-            const title = $block.find('h2, h3, .movie-title').first().text().trim();
+            let title = $block.find('h2, h3, .movie-title').first().text().trim();
+            
             if (!title || title.length < 2) return;
 
+            // --- FILTER JUNK TITLES ---
+            const lowTitle = title.toLowerCase();
+            if (junkText.some(junk => lowTitle.includes(junk))) return;
+
             const blockText = $block.text();
-            // Only look at blocks that don't say they are for a future day
-            if (blockText.match(/(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday)/i) && !blockText.includes('Today')) return;
+            const otherDays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].filter(d => d !== todayName);
+            if (otherDays.some(day => blockText.includes(day)) && !blockText.includes('Today')) return;
 
             const timeRx = /\b(\d{1,2}:\d{2}\s*[ap]m?)\b/gi;
             const foundTimes = blockText.match(timeRx);
@@ -59,16 +64,12 @@ async function scrapeShowtimes() {
                 const runtime = durMatch ? (parseInt(durMatch[1]) * 60 + parseInt(durMatch[2])) : 120;
 
                 times.forEach(t => {
-                    const start = timeMins(t);
-                    const end = start + runtime + 15;
-                    
-                    // --- THE FIX: TIME FILTER ---
-                    // Skip movies that ended more than 30 minutes ago
-                    if (end < (currentMins - 30)) return;
-
                     const fingerprint = `${title.toLowerCase()}|${t}`;
                     if (!seen.has(fingerprint)) {
                         seen.add(fingerprint);
+                        const start = timeMins(t);
+                        const end = start + runtime + 15;
+                        
                         showtimes.push({
                             movieId: title.toLowerCase().replace(/[^a-z0-9]+/g, '-') + '-' + idx++,
                             movie: title,
@@ -100,8 +101,8 @@ async function refresh() {
 }
 
 refresh();
-setInterval(refresh, 15 * 60 * 1000);
+setInterval(refresh, 20 * 60 * 1000);
 
 app.get('/showtimes', (req, res) => res.json({ ok: true, ...cache }));
-app.get('/', (req, res) => res.send(`Active: ${cache.showtimes.length} movies remaining.`));
+app.get('/', (req, res) => res.send(`Full Day: ${cache.showtimes.length} real movies loaded.`));
 app.listen(PORT);
