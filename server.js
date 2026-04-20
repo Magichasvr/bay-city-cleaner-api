@@ -41,19 +41,17 @@ async function scrapeShowtimes() {
             const $block = $(block);
             let title = $block.find('h1, h2, h3, .movie-title, .title').first().text().trim();
             
-            // 1. BLOCK ONLY THE HEADER BANNER
+            // Block the giant site header banner only
             if (!title || title.length < 5) return;
             const lowTitle = title.toLowerCase();
-            // We allow "Mystery Movie Monday" but block the site title banner
             if (lowTitle === "movies at bay city cinemas" || lowTitle === "bay city cinemas") return;
 
             const blockText = $block.text();
             
-            // 2. Date Filter
+            // Date Filter: Only show today's movies
             const otherDays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].filter(d => d !== todayName);
             if (otherDays.some(day => blockText.includes(day)) && !blockText.includes('Today')) return;
 
-            // 3. Time Hunt
             const timeRx = /\b(\d{1,2}:\d{2}\s*[ap]m?)\b/gi;
             const foundTimes = blockText.match(timeRx);
 
@@ -64,10 +62,6 @@ async function scrapeShowtimes() {
                     const isGDX = lowTitle.includes('gdx') || blockText.toLowerCase().includes('gdx');
                     const type = isGDX ? 'GDX' : (lowTitle.includes('mummy') ? 'Flashback' : 'General');
                     
-                    // 4. AUDITORIUM LOGIC (Since they are hidden inside ticket links)
-                    let aud = "See Ticket"; 
-                    if (isGDX) aud = "GDX Room"; 
-
                     const cleanTitle = title.replace(/gdx/gi, '').trim();
                     const fingerprint = `${cleanTitle.toLowerCase()}|${t}|${type}`;
 
@@ -78,7 +72,7 @@ async function scrapeShowtimes() {
                             movieId: cleanTitle.toLowerCase().replace(/[^a-z]/g,'') + '-' + start,
                             movie: cleanTitle,
                             theater: type,
-                            auditorium: aud, 
+                            auditorium: isGDX ? "GDX" : "Standard", 
                             startTime: t,
                             endTime: minsToTime(start + 135),
                             endMins: start + 135
@@ -104,5 +98,5 @@ refresh();
 setInterval(refresh, 20 * 60 * 1000);
 
 app.get('/showtimes', (req, res) => res.json({ ok: true, ...cache }));
-app.get('/', (req, res) => res.send(`Online: ${cache.showtimes.length} movies.`));
+app.get('/', (req, res) => res.send(`Online: ${cache.showtimes.length} movies loaded.`));
 app.listen(PORT);
