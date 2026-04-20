@@ -29,23 +29,43 @@ async function scrapeShowtimes() {
     const seen = new Set();
     const todayName = new Date().toLocaleDateString('en-US', { weekday: 'long' });
 
+    // Blocklist for specific text you don't want as "movies"
+    const junkText = [
+        "movies at bay city cinemas", 
+        "mystery movie monday", 
+        "wrestlemania", 
+        "wwe", 
+        "theater info", 
+        "coming soon", 
+        "showtimes", 
+        "trailers"
+    ];
+
     try {
         const response = await axios.get('https://www.baycitycinemas.com/', {
             headers: { 'User-Agent': 'Mozilla/5.0' },
-            timeout: 15000
+            timeout: 20000
         });
 
         const $ = cheerio.load(response.data);
+        let idx = 0;
 
-        // Scan every possible movie container
-        $('div, section, article, .movie-container, .film-item').each((_, block) => {
+        $('div, section, article, .movie-container').each((_, block) => {
             const $block = $(block);
-            const title = $block.find('h1, h2, h3, .movie-title, .title').first().text().trim();
+            let title = $block.find('h1, h2, h3, .movie-title').first().text().trim();
+            
             if (!title || title.length < 3) return;
+
+            // --- FILTER JUNK ---
+            const lowTitle = title.toLowerCase();
+            if (junkText.some(junk => lowTitle.includes(junk))) return;
 
             const blockText = $block.text();
             
-            // Check for times
+            // Only scrape today's showtimes
+            const otherDays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].filter(d => d !== todayName);
+            if (otherDays.some(day => blockText.includes(day)) && !blockText.includes('Today')) return;
+
             const timeRx = /\b(\d{1,2}:\d{2}\s*[ap]m?)\b/gi;
             const foundTimes = blockText.match(timeRx);
 
@@ -53,24 +73,22 @@ async function scrapeShowtimes() {
                 const times = [...new Set(foundTimes.map(t => t.replace(/\s/g, '').toLowerCase()))];
                 
                 times.forEach(t => {
-                    // Logic to detect GDX and Mummy/Flashback
-                    const isGDX = title.includes('GDX') || blockText.includes('GDX') || blockText.includes('Reserved Seating');
-                    const isMummy = title.toLowerCase().includes('mummy');
-                    const isFlashback = blockText.includes('Flashback') || isMummy;
+                    const isGDX = lowTitle.includes('gdx') || blockText.toLowerCase().includes('gdx') || blockText.includes('Reserved');
+                    const isMummy = lowTitle.includes('mummy');
+                    const theaterName = isGDX ? 'GDX' : (isMummy ? 'Flashback' : 'General');
                     
-                    const theaterType = isGDX ? 'GDX' : (isFlashback ? 'Flashback' : 'General');
-                    const cleanTitle = title.replace('GDX', '').trim();
+                    const cleanTitle = title.replace(/gdx/gi, '').trim();
+                    const fingerprint = `${cleanTitle.toLowerCase()}|${t}|${theaterName}`;
 
-                    const fingerprint = `${cleanTitle}|${t}|${theaterType}`;
                     if (!seen.has(fingerprint)) {
                         seen.add(fingerprint);
                         const start = timeMins(t);
                         showtimes.push({
-                            movieId: cleanTitle.toLowerCase().replace(/[^a-z]/g,'') + start,
+                            movieId: cleanTitle.toLowerCase().replace(/[^a-z]/g,'') + '-' + idx++,
                             movie: cleanTitle,
-                            theater: theaterType,
+                            theater: theaterName,
                             startTime: t,
-                            endTime: minsToTime(start + 135), // Assume ~2h 15m runtime
+                            endTime: minsToTime(start + 135),
                             endMins: start + 135
                         });
                     }
@@ -80,20 +98,22 @@ async function scrapeShowtimes() {
 
         return showtimes.sort((a, b) => a.endMins - b.endMins);
     } catch (err) {
-        console.error("Scrape Error:", err.message);
         return [];
     }
 }
 
-let cache = { date: 'April 19', showtimes: [] };
+let cache = { date: 'April 20', showtimes: [] };
+
 async function refresh() {
     const data = await scrapeShowtimes();
-    if (data.length > 0) cache.showtimes = data;
+    if (data.length > 0) {
+        cache.showtimes = data;
+    }
 }
 
 refresh();
 setInterval(refresh, 20 * 60 * 1000);
 
 app.get('/showtimes', (req, res) => res.json({ ok: true, ...cache }));
-app.get('/', (req, res) => res.send(`Online: ${cache.showtimes.length} movies loaded.`));
+app.get('/', (req, res) => res.send(`Live: ${cache.showtimes.length} movies. Junk filtered.`));
 app.listen(PORT);
