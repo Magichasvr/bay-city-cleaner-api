@@ -29,8 +29,8 @@ async function scrapeShowtimes() {
     const seen = new Set();
     const todayName = new Date().toLocaleDateString('en-US', { weekday: 'long' });
 
-    // --- NEW: THE BLOCKLIST ---
-    const junkText = ["showtimes", "trailers", "coming soon", "bay city cinemas", "theater info"];
+    // Blocklist for non-movie junk
+    const junkText = ["showtimes", "trailers", "coming soon", "bay city cinemas", "theater info", "wrestlemania", "wwe"];
 
     try {
         const response = await axios.get('https://www.baycitycinemas.com/', {
@@ -44,14 +44,14 @@ async function scrapeShowtimes() {
         $('div, section, article').each((_, block) => {
             const $block = $(block);
             let title = $block.find('h2, h3, .movie-title').first().text().trim();
-            
             if (!title || title.length < 2) return;
 
-            // --- FILTER JUNK TITLES ---
             const lowTitle = title.toLowerCase();
             if (junkText.some(junk => lowTitle.includes(junk))) return;
 
             const blockText = $block.text();
+            
+            // Date Filter: Only today's movies
             const otherDays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].filter(d => d !== todayName);
             if (otherDays.some(day => blockText.includes(day)) && !blockText.includes('Today')) return;
 
@@ -64,7 +64,14 @@ async function scrapeShowtimes() {
                 const runtime = durMatch ? (parseInt(durMatch[1]) * 60 + parseInt(durMatch[2])) : 120;
 
                 times.forEach(t => {
-                    const fingerprint = `${title.toLowerCase()}|${t}`;
+                    // --- RECOVERY LOGIC FOR GDX ---
+                    // Check both the title AND the block text for GDX
+                    const isGDX = lowTitle.includes('gdx') || blockText.toLowerCase().includes('gdx');
+                    const theaterName = isGDX ? 'GDX' : 'General';
+                    
+                    // Fingerprint includes theater name so GDX and General don't block each other
+                    const fingerprint = `${lowTitle.replace('gdx','')}|${t}|${theaterName}`;
+
                     if (!seen.has(fingerprint)) {
                         seen.add(fingerprint);
                         const start = timeMins(t);
@@ -72,9 +79,9 @@ async function scrapeShowtimes() {
                         
                         showtimes.push({
                             movieId: title.toLowerCase().replace(/[^a-z0-9]+/g, '-') + '-' + idx++,
-                            movie: title,
+                            movie: title.replace(/gdx/gi, '').trim(), 
                             rating: (blockText.match(/\b(NR|G|PG-13|PG|R)\b/) || ['', 'NR'])[1],
-                            theater: title.includes('GDX') ? 'GDX' : 'General',
+                            theater: theaterName,
                             startTime: t,
                             endTime: minsToTime(end),
                             endMins: end
@@ -104,5 +111,5 @@ refresh();
 setInterval(refresh, 20 * 60 * 1000);
 
 app.get('/showtimes', (req, res) => res.json({ ok: true, ...cache }));
-app.get('/', (req, res) => res.send(`Full Day: ${cache.showtimes.length} real movies loaded.`));
+app.get('/', (req, res) => res.send(`Live: ${cache.showtimes.length} movies loaded. GDX search active.`));
 app.listen(PORT);
