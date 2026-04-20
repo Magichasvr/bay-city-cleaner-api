@@ -7,6 +7,7 @@ const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 
+// --- HELPERS ---
 function timeMins(str) {
     str = str.trim().toLowerCase().replace('am', 'a').replace('pm', 'p');
     const pm = str.endsWith('p');
@@ -24,101 +25,84 @@ function minsToTime(mins) {
     return (h % 12 || 12) + ':' + String(m).padStart(2, '0') + (h >= 12 ? 'pm' : 'am');
 }
 
+async function fetchPage(url) {
+    const { data } = await axios.get(url, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+        timeout: 10000
+    });
+    return cheerio.load(data);
+}
+
+// --- SCRAPER ---
 async function scrapeShowtimes() {
     const showtimes = [];
     const seen = new Set();
-    const todayName = new Date().toLocaleDateString('en-US', { weekday: 'long' });
-    
-    // Block the WrestleMania and site headers
-    const junkText = ["showtimes", "trailers", "wrestlemania", "wwe", "theater info", "coming soon"];
+    const movieLinks = new Set();
+    const todayStr = new Date().toISOString().split('T')[0]; // 2026-04-19
 
     try {
-        const response = await axios.get('https://www.baycitycinemas.com/', {
-            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
-            timeout: 20000
+        // 1. Get all movie links from the homepage
+        const $ = await fetchPage('https://www.baycitycinemas.com/');
+        $('a[href*="/movie/"]').each((_, el) => {
+            let href = $(el).attr('href');
+            if (href.startsWith('/')) href = 'https://www.baycitycinemas.com' + href;
+            movieLinks.add(href);
         });
 
-        const $ = cheerio.load(response.data);
-        let idx = 0;
+        // 2. Visit each movie page to get times
+        for (let link of movieLinks) {
+            try {
+                const $m = await fetchPage(link);
+                const title = $m('h1, h2').first().text().trim();
+                if (!title || title.toLowerCase().includes('coming soon')) continue;
 
-        // TARGETING THE MOVIE BLOCKS
-        $('div, article, section').each((_, block) => {
-            const $block = $(block);
-            let title = $block.find('h1, h2, h3, .movie-title, .title').first().text().trim();
-            
-            if (!title || title.length < 2) return;
-            if (junkText.some(junk => title.toLowerCase().includes(junk))) return;
-
-            const blockText = $block.text();
-
-            // DATE FILTER: Ensure we only get Today (Sun 19)
-            // We ignore blocks that mention other days unless they also say "Today"
-            const days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
-            const otherDays = days.filter(d => d !== todayName);
-            if (otherDays.some(d => blockText.includes(d)) && !blockText.includes('Today')) return;
-
-            // TIME DETECTION
-            const timeRx = /\b(\d{1,2}:\d{2}\s*[ap]m?)\b/gi;
-            const foundTimes = blockText.match(timeRx);
-
-            if (foundTimes) {
-                const times = [...new Set(foundTimes.map(t => t.replace(/\s/g, '').toLowerCase()))];
-                
-                // RUNTIME DETECTION
-                const durMatch = blockText.match(/(\d+)h\s*(\d+)m/);
-                const runtime = durMatch ? (parseInt(durMatch[1]) * 60 + parseInt(durMatch[2])) : 130;
-
-                times.forEach(t => {
-                    // --- THE FIX: GDX & FLASHBACK DETECTION ---
-                    const isGDX = blockText.includes('GDX') || blockText.includes('Reserved Seating');
-                    const isFlashback = blockText.includes('Flashback') || title.includes('Anniversary');
+                // Look specifically at the block for today
+                $m('.showtimes, .movie-showtimes, .dates-container').each((_, block) => {
+                    const $block = $m(block);
+                    const blockText = $block.text();
                     
-                    const theaterName = isGDX ? 'GDX' : (isFlashback ? 'Flashback' : 'General');
-                    const cleanTitle = title.replace(/GDX/g, '').trim();
+                    // Only scrape if it's for Today
+                    if (!blockText.includes('Today') && !blockText.includes('Sun 19')) return;
 
-                    // FINGERPRINT ensures "Mario (GDX)" and "Mario (Standard)" both show up
-                    const fingerprint = `${cleanTitle.toLowerCase()}|${t}|${theaterName}`;
-
-                    if (!seen.has(fingerprint)) {
-                        seen.add(fingerprint);
-                        const start = timeMins(t);
-                        const end = start + runtime + 15;
+                    const times = blockText.match(/\b(\d{1,2}:\d{2}\s*[ap]m?)\b/gi);
+                    if (times) {
+                        const runtime = parseInt(blockText.match(/(\d+)h/)?.[1] || 2) * 60 + 15;
                         
-                        showtimes.push({
-                            movieId: cleanTitle.toLowerCase().replace(/[^a-z0-9]+/g, '-') + '-' + idx++,
-                            movie: cleanTitle,
-                            rating: (blockText.match(/\b(NR|G|PG-13|PG|R)\b/) || ['', 'NR'])[1],
-                            theater: theaterName,
-                            startTime: t,
-                            endTime: minsToTime(end),
-                            endMins: end
+                        times.forEach(t => {
+                            const isGDX = title.includes('GDX') || blockText.includes('GDX');
+                            const type = isGDX ? 'GDX' : (blockText.includes('Flashback') ? 'Flashback' : 'General');
+                            
+                            const fingerprint = `${title}|${t}|${type}`;
+                            if (!seen.has(fingerprint)) {
+                                seen.add(fingerprint);
+                                const start = timeMins(t);
+                                showtimes.push({
+                                    movieId: title.toLowerCase().replace(/[^a-z]/g,'') + start,
+                                    movie: title.replace('GDX', '').trim(),
+                                    theater: type,
+                                    startTime: t,
+                                    endTime: minsToTime(start + runtime + 15),
+                                    endMins: start + runtime + 15
+                                });
+                            }
                         });
                     }
                 });
-            }
-        });
-
+            } catch (e) { continue; }
+        }
         return showtimes.sort((a, b) => a.endMins - b.endMins);
-    } catch (err) {
-        return [];
-    }
+    } catch (err) { return []; }
 }
 
-let cache = { date: '', showtimes: [] };
-
+let cache = { date: 'April 19', showtimes: [] };
 async function refresh() {
-    let data = await scrapeShowtimes();
-    if (data.length > 0) {
-        cache = {
-            date: new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric' }),
-            showtimes: data
-        };
-    }
+    const data = await scrapeShowtimes();
+    if (data.length > 0) cache.showtimes = data;
 }
 
 refresh();
-setInterval(refresh, 20 * 60 * 1000);
+setInterval(refresh, 30 * 60 * 1000);
 
 app.get('/showtimes', (req, res) => res.json({ ok: true, ...cache }));
-app.get('/', (req, res) => res.send(`Full Day: ${cache.showtimes.length} movies. Flashback & GDX scan active.`));
+app.get('/', (req, res) => res.send(`Loaded ${cache.showtimes.length} movies via Deep Scan.`));
 app.listen(PORT);
