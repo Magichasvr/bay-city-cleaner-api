@@ -39,21 +39,22 @@ async function scrapeShowtimes() {
         const $ = cheerio.load(response.data);
         let idx = 0;
 
-        // Broaden the search to look at every possible container
-        $('div, section, article, .movie-list-item, .film-item').each((_, block) => {
+        // Force scan EVERY container that looks like a movie card or special event
+        $('div, section, article, .movie-list-item, .film-item, .event-item').each((_, block) => {
             const $block = $(block);
-            let title = $block.find('h1, h2, h3, h4, .movie-title, .title').first().text().trim();
+            let title = $block.find('h1, h2, h3, h4, .movie-title, .title, .event-title').first().text().trim();
             
             if (!title || title.length < 2) return;
             if (junkText.some(junk => title.toLowerCase().includes(junk))) return;
 
             const blockText = $block.text();
             
-            // Check for other days to avoid week-long lists
-            const otherDays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].filter(d => d !== todayName);
-            if (otherDays.some(day => blockText.includes(day)) && !blockText.includes('Today')) return;
+            // Allow "The Mummy" or "Flashback" even if the date filter is being tricky
+            const isSpecial = title.toLowerCase().includes('mummy') || blockText.toLowerCase().includes('flashback');
 
-            // Look for times in the block
+            const otherDays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].filter(d => d !== todayName);
+            if (!isSpecial && otherDays.some(day => blockText.includes(day)) && !blockText.includes('Today')) return;
+
             const timeRx = /\b(\d{1,2}:\d{2}\s*[ap]m?)\b/gi;
             const foundTimes = blockText.match(timeRx);
 
@@ -63,16 +64,10 @@ async function scrapeShowtimes() {
                 const runtime = durMatch ? (parseInt(durMatch[1]) * 60 + parseInt(durMatch[2])) : 125;
 
                 times.forEach(t => {
-                    // ENHANCED GDX DETECTION:
-                    // Look in title, block text, and even attributes/classes of children
-                    const isGDX = title.toUpperCase().includes('GDX') || 
-                                  blockText.toUpperCase().includes('GDX') ||
-                                  $block.find('.gdx, .premium, .format').length > 0;
+                    const isGDX = title.toUpperCase().includes('GDX') || blockText.toUpperCase().includes('GDX');
+                    const theaterName = isGDX ? 'GDX' : (blockText.toLowerCase().includes('flashback') ? 'Flashback' : 'General');
                     
-                    const theaterName = isGDX ? 'GDX' : 'General';
                     const cleanTitle = title.replace(/gdx/gi, '').trim();
-                    
-                    // The ID must include the theater name so GDX movies show up alongside Standard ones
                     const fingerprint = `${cleanTitle.toLowerCase()}|${t}|${theaterName}`;
 
                     if (!seen.has(fingerprint)) {
@@ -114,5 +109,5 @@ refresh();
 setInterval(refresh, 15 * 60 * 1000);
 
 app.get('/showtimes', (req, res) => res.json({ ok: true, ...cache }));
-app.get('/', (req, res) => res.send(`Full Day: ${cache.showtimes.length} movies. GDX scan forced.`));
+app.get('/', (req, res) => res.send(`Full Day: ${cache.showtimes.length} movies. Mummy search active.`));
 app.listen(PORT);
