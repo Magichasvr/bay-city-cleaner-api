@@ -7,9 +7,6 @@ const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 
-// Helper to wait between "clicks" so the theater doesn't block us
-const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-
 function timeMins(str) {
     str = str.trim().toLowerCase().replace('am', 'a').replace('pm', 'p');
     const pm = str.endsWith('p');
@@ -34,77 +31,72 @@ async function scrapeShowtimes() {
 
     try {
         const response = await axios.get('https://www.baycitycinemas.com/', {
-            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
-            timeout: 15000
+            headers: { 'User-Agent': 'Mozilla/5.0' },
+            timeout: 10000
         });
 
         const $ = cheerio.load(response.data);
-        const ticketTasks = [];
 
-        $('div, section, article, .movie-container').each((_, block) => {
+        // Map out the movies first so we don't have an empty screen
+        const blocks = $('div, section, article, .movie-container').toArray();
+
+        for (const block of blocks) {
             const $block = $(block);
             let title = $block.find('h1, h2, h3, .movie-title, .title').first().text().trim();
             
-            // Hard block for the banner
-            if (!title || title.length < 5) return;
+            // Filter Junk
+            if (!title || title.length < 5) continue;
             const lowTitle = title.toLowerCase();
-            if (lowTitle.includes("bay city cinemas") || lowTitle === "movies") return;
+            if (lowTitle.includes("bay city cinemas") || lowTitle.includes("mystery") || lowTitle === "movies") continue;
 
-            // Find ticket links within this specific movie block
-            $block.find('a[href*="/tickets/"]').each((__, link) => {
-                const $link = $(link);
-                const timeText = $link.text().trim();
-                const timeMatch = timeText.match(/\b(\d{1,2}:\d{2}\s*[ap]m?)\b/i);
+            const timeRx = /\b(\d{1,2}:\d{2}\s*[ap]m?)\b/gi;
+            const foundTimes = $block.text().match(timeRx);
 
-                if (timeMatch) {
-                    const t = timeMatch[1].replace(/\s/g, '').toLowerCase();
-                    let ticketUrl = $link.attr('href');
-                    if (ticketUrl.startsWith('/')) ticketUrl = 'https://www.baycitycinemas.com' + ticketUrl;
+            if (foundTimes) {
+                const times = [...new Set(foundTimes.map(t => t.replace(/\s/g, '').toLowerCase()))];
+                
+                for (const t of times) {
+                    const cleanTitle = title.replace(/gdx/gi, '').trim();
+                    const start = timeMins(t);
                     
-                    ticketTasks.push({ title, t, ticketUrl, lowTitle });
-                }
-            });
-        });
+                    // AUDITORIUM LOGIC: Look for a link in this block that matches this time
+                    const ticketLink = $block.find(`a:contains("${t}"), a:contains("${t.toUpperCase()}")`).attr('href');
+                    let aud = "Scanning..."; // Placeholder while background scan happens
 
-        // Visit each ticket page one-by-one with a tiny delay
-        for (const task of ticketTasks) {
-            try {
-                // Wait 300ms between requests to avoid being blocked
-                await sleep(300); 
-                
-                const tixRes = await axios.get(task.ticketUrl, { 
-                    headers: { 'User-Agent': 'Mozilla/5.0' },
-                    timeout: 6000 
-                });
-                const $tix = cheerio.load(tixRes.data);
-                const pageText = $tix('body').text();
-                
-                // Hunt for "Auditorium X"
-                const audMatch = pageText.match(/Auditorium\s*(\d+)/i) || pageText.match(/Theater\s*(\d+)/i);
-                let aud = audMatch ? `Aud ${audMatch[1]}` : "Std";
-                
-                if (task.lowTitle.includes('gdx')) aud = "GDX";
+                    if (lowTitle.includes('gdx')) aud = "GDX";
 
-                const cleanTitle = task.title.replace(/gdx/gi, '').trim();
-                const fingerprint = `${cleanTitle.toLowerCase()}|${task.t}`;
-
-                if (!seen.has(fingerprint)) {
-                    seen.add(fingerprint);
-                    const start = timeMins(task.t);
                     showtimes.push({
                         movieId: cleanTitle.toLowerCase().replace(/[^a-z]/g,'') + '-' + start,
                         movie: cleanTitle,
-                        theater: task.lowTitle.includes('gdx') ? 'GDX' : 'General',
-                        auditorium: aud, 
-                        startTime: task.t,
+                        theater: lowTitle.includes('gdx') ? 'GDX' : 'General',
+                        auditorium: aud,
+                        ticketUrl: ticketLink ? (ticketLink.startsWith('http') ? ticketLink : 'https://www.baycitycinemas.com' + ticketLink) : null,
+                        startTime: t,
                         endTime: minsToTime(start + 135),
                         endMins: start + 135
                     });
                 }
-            } catch (e) { continue; }
+            }
         }
 
-        return showtimes.sort((a, b) => a.endMins - b.endMins);
+        // BACKGROUND SCAN: Try to grab numbers for the first 10 movies quickly
+        // We limit this so the server doesn't crash/timeout
+        const sorted = showtimes.sort((a, b) => a.endMins - b.endMins);
+        
+        for (let i = 0; i < Math.min(sorted.length, 12); i++) {
+            if (sorted[i].ticketUrl && sorted[i].auditorium === "Scanning...") {
+                try {
+                    const tixRes = await axios.get(sorted[i].ticketUrl, { timeout: 3000 });
+                    const $tix = cheerio.load(tixRes.data);
+                    const audMatch = $tix('body').text().match(/(?:Auditorium|Theater)\s*(\d+)/i);
+                    if (audMatch) sorted[i].auditorium = "Aud " + audMatch[1];
+                } catch (e) {
+                    sorted[i].auditorium = "Std";
+                }
+            }
+        }
+
+        return sorted;
     } catch (err) {
         return [];
     }
@@ -117,8 +109,8 @@ async function refresh() {
 }
 
 refresh();
-setInterval(refresh, 20 * 60 * 1000);
+setInterval(refresh, 15 * 60 * 1000);
 
 app.get('/showtimes', (req, res) => res.json({ ok: true, ...cache }));
-app.get('/', (req, res) => res.send(`Online: ${cache.showtimes.length} movies with Auditorium numbers.`));
+app.get('/', (req, res) => res.send(`Live: ${cache.showtimes.length} movies.`));
 app.listen(PORT);
