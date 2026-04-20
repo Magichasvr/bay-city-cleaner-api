@@ -3,7 +3,12 @@ const cors    = require('cors');
 const app     = express();
 const PORT    = process.env.PORT || 3000;
 
-app.use(cors());
+// FIXED: More robust CORS settings to stop "Unable to reach server" errors
+app.use(cors({
+  origin: '*', 
+  methods: ['GET', 'POST'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
 
 // ── time helpers ─────────────────────────────────────────────────────────────
 
@@ -39,92 +44,112 @@ function slugify(s, i) {
 // ── scrape ───────────────────────────────────────────────────────────────────
 
 async function scrapeShowtimes() {
-  // Dynamic import for node-fetch v3
   const { default: fetch } = await import('node-fetch');
   const { load } = await import('cheerio');
 
-  const res = await fetch('https://www.baycitycinemas.com/', {
-    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BayCityCleaner/1.0)' },
-    timeout: 15000
-  });
-  if (!res.ok) throw new Error('Site returned ' + res.status);
-  const html = await res.text();
-  const $    = load(html);
+  try {
+    const res = await fetch('https://www.baycitycinemas.com/', {
+      headers: { 
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' 
+      },
+      timeout: 20000 // Increased timeout for slow Render starts
+    });
+    
+    if (!res.ok) throw new Error('Site returned ' + res.status);
+    const html = await res.text();
+    const $    = load(html);
 
-  const showtimes = [];
-  let idx = 0;
+    const showtimes = [];
+    let idx = 0;
 
-  $('h3').each((_, el) => {
-    const title = $(el).text().trim();
-    if (!title || title.length < 2) return;
+    $('h3').each((_, el) => {
+      const title = $(el).text().trim();
+      if (!title || title.length < 2) return;
 
-    // Walk up to find the containing block for this movie
-    const block = $(el).closest('div[class], section, article, li').first();
-    const text  = block.length ? block.text() : $(el).parent().text();
+      const block = $(el).closest('div[class], section, article, li').first();
+      const text  = block.length ? block.text() : $(el).parent().text();
 
-    const ratingM  = text.match(/\b(NR|G|PG-13|PG|R)\b/);
-    const rating   = ratingM ? ratingM[1] : 'NR';
+      const ratingM  = text.match(/\b(NR|G|PG-13|PG|R)\b/);
+      const rating   = ratingM ? ratingM[1] : 'NR';
 
-    const durM     = text.match(/(\d+)h\s*(\d+)m/);
-    const duration = durM ? durM[0] : '0h 0m';
-    const runtime  = durMins(duration);
+      const durM      = text.match(/(\d+)h\s*(\d+)m/);
+      const duration = durM ? durM[0] : '0h 0m';
+      const runtime   = durMins(duration);
 
-    let theater = 'General';
-    if (title.includes('GDX')) theater = 'GDX';
-    else if (text.toLowerCase().includes('flashback')) theater = 'Flashback';
+      let theater = 'General';
+      if (title.includes('GDX')) theater = 'GDX';
+      else if (text.toLowerCase().includes('flashback')) theater = 'Flashback';
 
-    // Extract all times like "10:20a", "2:45p", "10:20am", "2:45pm"
-    const timeRx = /\b(\d{1,2}:\d{2}\s*[ap]m?)\b/gi;
-    const times  = [...new Set((text.match(timeRx) || []).map(t => t.replace(/\s/g,'').toLowerCase()))];
+      const timeRx = /\b(\d{1,2}:\d{2}\s*[ap]m?)\b/gi;
+      const times  = [...new Set((text.match(timeRx) || []).map(t => t.replace(/\s/g,'').toLowerCase()))];
 
-    times.forEach(t => {
-      const exitMins = timeMins(t) + runtime + 15;
-      showtimes.push({
-        movieId:  slugify(title, idx++),
-        movie:    title,
-        rating,
-        theater,
-        startTime: t,
-        duration,
-        endTime:  minsToTime(exitMins),
-        endMins:  exitMins
+      times.forEach(t => {
+        const exitMins = timeMins(t) + runtime + 15; // 15 min buffer for cleaning
+        showtimes.push({
+          movieId:  slugify(title, idx++),
+          movie:    title,
+          rating,
+          theater,
+          startTime: t,
+          duration,
+          endTime:  minsToTime(exitMins),
+          endMins:  exitMins
+        });
       });
     });
-  });
 
-  return showtimes.sort((a, b) => a.endMins - b.endMins);
+    return showtimes.sort((a, b) => a.endMins - b.endMins);
+  } catch (err) {
+    console.error('Scraper inner error:', err.message);
+    return [];
+  }
 }
 
-// ── cache (refresh every 30 min) ─────────────────────────────────────────────
+// ── cache ─────────────────────────────────────────────────────────────
 
 let cache = { date: '', showtimes: [] };
 
 async function refreshCache() {
-  try {
-    console.log('Refreshing showtimes…');
-    const data = await scrapeShowtimes();
+  console.log('Refreshing showtimes…');
+  const data = await scrapeShowtimes();
+  if (data && data.length > 0) {
     cache = { date: new Date().toISOString().slice(0,10), showtimes: data };
-    console.log('Got ' + data.length + ' showtimes');
-  } catch(e) {
-    console.error('Scrape error:', e.message);
+    console.log('Successfully cached ' + data.length + ' showtimes');
+  } else {
+    console.log('Scrape returned no data, keeping old cache if available.');
   }
 }
 
+// Initial run
 refreshCache();
-setInterval(refreshCache, 30 * 60 * 1000); // every 30 minutes
+// Refresh every 15 minutes to match the Render sleep cycle
+setInterval(refreshCache, 15 * 60 * 1000); 
 
 // ── routes ───────────────────────────────────────────────────────────────────
 
 app.get('/showtimes', (req, res) => {
-  res.json({ ok: true, date: cache.date, showtimes: cache.showtimes });
+  // If cache is empty, try one quick refresh
+  if (cache.showtimes.length === 0) {
+    console.log('Cache empty on request, attempting emergency refresh...');
+    refreshCache().then(() => {
+        res.json({ ok: true, date: cache.date, showtimes: cache.showtimes });
+    });
+  } else {
+    res.json({ ok: true, date: cache.date, showtimes: cache.showtimes });
+  }
 });
 
 app.get('/health', (req, res) => {
-  res.json({ ok: true, count: cache.showtimes.length, date: cache.date });
+  res.json({ 
+    ok: true, 
+    count: cache.showtimes.length, 
+    date: cache.date,
+    status: "Service is active" 
+  });
 });
 
 app.get('/', (req, res) => {
-  res.send('Bay City Cleaner API is running. GET /showtimes for data.');
+  res.send('<h1>Bay City Cleaner API</h1><p>Status: Running</p><p>Endpoint: <a href="/showtimes">/showtimes</a></p>');
 });
 
-app.listen(PORT, () => console.log('Server on port ' + PORT));
+app.listen(PORT, () => console.log('Server is live on port ' + PORT));
