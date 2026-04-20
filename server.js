@@ -41,34 +41,46 @@ async function scrapeShowtimes() {
             const $block = $(block);
             let title = $block.find('h1, h2, h3, .movie-title, .title').first().text().trim();
             
-            // --- THE CLEANUP FILTER ---
+            // Nuclear Banner/Junk Block
             if (!title || title.length < 5) return;
-            
             const lowTitle = title.toLowerCase();
-            
-            // This specifically kills the banner and the mystery movie
-            if (lowTitle.includes("movies at bay city cinemas") || 
-                lowTitle.includes("bay city cinemas") || 
-                lowTitle.includes("mystery movie monday")) {
-                return; 
-            }
+            if (lowTitle.includes("bay city cinemas") || 
+                lowTitle.includes("mystery movie monday") || 
+                lowTitle === "movies") return;
 
             const blockText = $block.text();
             
-            // Date Filter: Only today's movies
+            // Date Filter
             const otherDays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].filter(d => d !== todayName);
             if (otherDays.some(day => blockText.includes(day)) && !blockText.includes('Today')) return;
 
-            const timeRx = /\b(\d{1,2}:\d{2}\s*[ap]m?)\b/gi;
-            const foundTimes = blockText.match(timeRx);
+            // Find all showtime buttons/links in this block
+            $block.find('a, button').each((__, btn) => {
+                const $btn = $(btn);
+                const btnText = $btn.text().trim();
+                const timeMatch = btnText.match(/\b(\d{1,2}:\d{2}\s*[ap]m?)\b/i);
 
-            if (foundTimes) {
-                const times = [...new Set(foundTimes.map(t => t.replace(/\s/g, '').toLowerCase()))];
-                
-                times.forEach(t => {
+                if (timeMatch) {
+                    const t = timeMatch[1].replace(/\s/g, '').toLowerCase();
+                    
+                    // --- AUDITORIUM DETECTION ---
+                    // Scrape the data attributes or the link itself for theatre ID
+                    let audNum = $btn.attr('data-theatre') || 
+                                 $btn.attr('data-aud') || 
+                                 $btn.attr('data-auditorium') ||
+                                 "";
+                    
+                    // Fallback: Check the href link for a theatre code (e.g., ...&theatre=5)
+                    const href = $btn.attr('href') || "";
+                    const hrefMatch = href.match(/[?&](?:theatre|aud)=(\d+)/i);
+                    if (!audNum && hrefMatch) audNum = hrefMatch[1];
+
                     const isGDX = lowTitle.includes('gdx') || blockText.toLowerCase().includes('gdx');
                     const type = isGDX ? 'GDX' : (lowTitle.includes('mummy') ? 'Flashback' : 'General');
                     
+                    // Final formatting
+                    let auditorium = isGDX ? "GDX" : (audNum ? `Aud ${audNum}` : "Check Tix");
+
                     const cleanTitle = title.replace(/gdx/gi, '').trim();
                     const fingerprint = `${cleanTitle.toLowerCase()}|${t}|${type}`;
 
@@ -79,14 +91,14 @@ async function scrapeShowtimes() {
                             movieId: cleanTitle.toLowerCase().replace(/[^a-z]/g,'') + '-' + start,
                             movie: cleanTitle,
                             theater: type,
-                            auditorium: isGDX ? "GDX" : "Standard", 
+                            auditorium: auditorium, 
                             startTime: t,
                             endTime: minsToTime(start + 135),
                             endMins: start + 135
                         });
                     }
-                });
-            }
+                }
+            });
         });
 
         return showtimes.sort((a, b) => a.endMins - b.endMins);
