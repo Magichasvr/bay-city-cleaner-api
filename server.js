@@ -28,49 +28,52 @@ async function scrapeShowtimes() {
     const showtimes = [];
     const seen = new Set();
     const todayName = new Date().toLocaleDateString('en-US', { weekday: 'long' });
-
-    // Blocklist for non-movie junk
     const junkText = ["showtimes", "trailers", "coming soon", "bay city cinemas", "theater info", "wrestlemania", "wwe"];
 
     try {
         const response = await axios.get('https://www.baycitycinemas.com/', {
             headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
-            timeout: 20000
+            timeout: 25000
         });
 
         const $ = cheerio.load(response.data);
         let idx = 0;
 
-        $('div, section, article').each((_, block) => {
+        // Broaden the search to look at every possible container
+        $('div, section, article, .movie-list-item, .film-item').each((_, block) => {
             const $block = $(block);
-            let title = $block.find('h2, h3, .movie-title').first().text().trim();
+            let title = $block.find('h1, h2, h3, h4, .movie-title, .title').first().text().trim();
+            
             if (!title || title.length < 2) return;
-
-            const lowTitle = title.toLowerCase();
-            if (junkText.some(junk => lowTitle.includes(junk))) return;
+            if (junkText.some(junk => title.toLowerCase().includes(junk))) return;
 
             const blockText = $block.text();
             
-            // Date Filter: Only today's movies
+            // Check for other days to avoid week-long lists
             const otherDays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].filter(d => d !== todayName);
             if (otherDays.some(day => blockText.includes(day)) && !blockText.includes('Today')) return;
 
+            // Look for times in the block
             const timeRx = /\b(\d{1,2}:\d{2}\s*[ap]m?)\b/gi;
             const foundTimes = blockText.match(timeRx);
 
             if (foundTimes) {
                 const times = [...new Set(foundTimes.map(t => t.replace(/\s/g, '').toLowerCase()))];
                 const durMatch = blockText.match(/(\d+)h\s*(\d+)m/);
-                const runtime = durMatch ? (parseInt(durMatch[1]) * 60 + parseInt(durMatch[2])) : 120;
+                const runtime = durMatch ? (parseInt(durMatch[1]) * 60 + parseInt(durMatch[2])) : 125;
 
                 times.forEach(t => {
-                    // --- RECOVERY LOGIC FOR GDX ---
-                    // Check both the title AND the block text for GDX
-                    const isGDX = lowTitle.includes('gdx') || blockText.toLowerCase().includes('gdx');
-                    const theaterName = isGDX ? 'GDX' : 'General';
+                    // ENHANCED GDX DETECTION:
+                    // Look in title, block text, and even attributes/classes of children
+                    const isGDX = title.toUpperCase().includes('GDX') || 
+                                  blockText.toUpperCase().includes('GDX') ||
+                                  $block.find('.gdx, .premium, .format').length > 0;
                     
-                    // Fingerprint includes theater name so GDX and General don't block each other
-                    const fingerprint = `${lowTitle.replace('gdx','')}|${t}|${theaterName}`;
+                    const theaterName = isGDX ? 'GDX' : 'General';
+                    const cleanTitle = title.replace(/gdx/gi, '').trim();
+                    
+                    // The ID must include the theater name so GDX movies show up alongside Standard ones
+                    const fingerprint = `${cleanTitle.toLowerCase()}|${t}|${theaterName}`;
 
                     if (!seen.has(fingerprint)) {
                         seen.add(fingerprint);
@@ -78,8 +81,8 @@ async function scrapeShowtimes() {
                         const end = start + runtime + 15;
                         
                         showtimes.push({
-                            movieId: title.toLowerCase().replace(/[^a-z0-9]+/g, '-') + '-' + idx++,
-                            movie: title.replace(/gdx/gi, '').trim(), 
+                            movieId: cleanTitle.toLowerCase().replace(/[^a-z0-9]+/g, '-') + '-' + idx++,
+                            movie: cleanTitle,
                             rating: (blockText.match(/\b(NR|G|PG-13|PG|R)\b/) || ['', 'NR'])[1],
                             theater: theaterName,
                             startTime: t,
@@ -108,8 +111,8 @@ async function refresh() {
 }
 
 refresh();
-setInterval(refresh, 20 * 60 * 1000);
+setInterval(refresh, 15 * 60 * 1000);
 
 app.get('/showtimes', (req, res) => res.json({ ok: true, ...cache }));
-app.get('/', (req, res) => res.send(`Live: ${cache.showtimes.length} movies loaded. GDX search active.`));
+app.get('/', (req, res) => res.send(`Full Day: ${cache.showtimes.length} movies. GDX scan forced.`));
 app.listen(PORT);
