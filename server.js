@@ -28,46 +28,55 @@ async function scrapeShowtimes() {
     const showtimes = [];
     const seen = new Set();
     const todayName = new Date().toLocaleDateString('en-US', { weekday: 'long' });
-    const junkText = ["showtimes", "trailers", "coming soon", "bay city cinemas", "theater info", "wrestlemania", "wwe"];
+    
+    // Block the WrestleMania and site headers
+    const junkText = ["showtimes", "trailers", "wrestlemania", "wwe", "theater info", "coming soon"];
 
     try {
         const response = await axios.get('https://www.baycitycinemas.com/', {
             headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
-            timeout: 25000
+            timeout: 20000
         });
 
         const $ = cheerio.load(response.data);
         let idx = 0;
 
-        // Force scan EVERY container that looks like a movie card or special event
-        $('div, section, article, .movie-list-item, .film-item, .event-item').each((_, block) => {
+        // TARGETING THE MOVIE BLOCKS
+        $('div, article, section').each((_, block) => {
             const $block = $(block);
-            let title = $block.find('h1, h2, h3, h4, .movie-title, .title, .event-title').first().text().trim();
+            let title = $block.find('h1, h2, h3, .movie-title, .title').first().text().trim();
             
             if (!title || title.length < 2) return;
             if (junkText.some(junk => title.toLowerCase().includes(junk))) return;
 
             const blockText = $block.text();
-            
-            // Allow "The Mummy" or "Flashback" even if the date filter is being tricky
-            const isSpecial = title.toLowerCase().includes('mummy') || blockText.toLowerCase().includes('flashback');
 
-            const otherDays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].filter(d => d !== todayName);
-            if (!isSpecial && otherDays.some(day => blockText.includes(day)) && !blockText.includes('Today')) return;
+            // DATE FILTER: Ensure we only get Today (Sun 19)
+            // We ignore blocks that mention other days unless they also say "Today"
+            const days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+            const otherDays = days.filter(d => d !== todayName);
+            if (otherDays.some(d => blockText.includes(d)) && !blockText.includes('Today')) return;
 
+            // TIME DETECTION
             const timeRx = /\b(\d{1,2}:\d{2}\s*[ap]m?)\b/gi;
             const foundTimes = blockText.match(timeRx);
 
             if (foundTimes) {
                 const times = [...new Set(foundTimes.map(t => t.replace(/\s/g, '').toLowerCase()))];
+                
+                // RUNTIME DETECTION
                 const durMatch = blockText.match(/(\d+)h\s*(\d+)m/);
-                const runtime = durMatch ? (parseInt(durMatch[1]) * 60 + parseInt(durMatch[2])) : 125;
+                const runtime = durMatch ? (parseInt(durMatch[1]) * 60 + parseInt(durMatch[2])) : 130;
 
                 times.forEach(t => {
-                    const isGDX = title.toUpperCase().includes('GDX') || blockText.toUpperCase().includes('GDX');
-                    const theaterName = isGDX ? 'GDX' : (blockText.toLowerCase().includes('flashback') ? 'Flashback' : 'General');
+                    // --- THE FIX: GDX & FLASHBACK DETECTION ---
+                    const isGDX = blockText.includes('GDX') || blockText.includes('Reserved Seating');
+                    const isFlashback = blockText.includes('Flashback') || title.includes('Anniversary');
                     
-                    const cleanTitle = title.replace(/gdx/gi, '').trim();
+                    const theaterName = isGDX ? 'GDX' : (isFlashback ? 'Flashback' : 'General');
+                    const cleanTitle = title.replace(/GDX/g, '').trim();
+
+                    // FINGERPRINT ensures "Mario (GDX)" and "Mario (Standard)" both show up
                     const fingerprint = `${cleanTitle.toLowerCase()}|${t}|${theaterName}`;
 
                     if (!seen.has(fingerprint)) {
@@ -99,15 +108,17 @@ let cache = { date: '', showtimes: [] };
 
 async function refresh() {
     let data = await scrapeShowtimes();
-    cache = {
-        date: new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric' }),
-        showtimes: data
-    };
+    if (data.length > 0) {
+        cache = {
+            date: new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric' }),
+            showtimes: data
+        };
+    }
 }
 
 refresh();
-setInterval(refresh, 15 * 60 * 1000);
+setInterval(refresh, 20 * 60 * 1000);
 
 app.get('/showtimes', (req, res) => res.json({ ok: true, ...cache }));
-app.get('/', (req, res) => res.send(`Full Day: ${cache.showtimes.length} movies. Mummy search active.`));
+app.get('/', (req, res) => res.send(`Full Day: ${cache.showtimes.length} movies. Flashback & GDX scan active.`));
 app.listen(PORT);
