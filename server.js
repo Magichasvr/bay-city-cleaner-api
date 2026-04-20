@@ -29,7 +29,7 @@ async function scrapeShowtimes() {
     const seen = new Set();
     const todayName = new Date().toLocaleDateString('en-US', { weekday: 'long' });
 
-    // Blocklist for specific text you don't want as "movies"
+    // STRICT BLOCKLIST
     const junkText = [
         "movies at bay city cinemas", 
         "mystery movie monday", 
@@ -37,8 +37,8 @@ async function scrapeShowtimes() {
         "wwe", 
         "theater info", 
         "coming soon", 
-        "showtimes", 
-        "trailers"
+        "trailers",
+        "find tickets"
     ];
 
     try {
@@ -52,19 +52,23 @@ async function scrapeShowtimes() {
 
         $('div, section, article, .movie-container').each((_, block) => {
             const $block = $(block);
-            let title = $block.find('h1, h2, h3, .movie-title').first().text().trim();
+            let title = $block.find('h1, h2, h3, .movie-title, .title').first().text().trim();
             
+            // 1. Skip empty or junk headers
             if (!title || title.length < 3) return;
-
-            // --- FILTER JUNK ---
             const lowTitle = title.toLowerCase();
             if (junkText.some(junk => lowTitle.includes(junk))) return;
 
             const blockText = $block.text();
             
-            // Only scrape today's showtimes
+            // 2. Date Filter
             const otherDays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].filter(d => d !== todayName);
             if (otherDays.some(day => blockText.includes(day)) && !blockText.includes('Today')) return;
+
+            // 3. Auditorium Detection
+            // This looks for "Auditorium X" or "Theater X" in the text
+            const audMatch = blockText.match(/(?:Auditorium|Theater|Screen)\s*(\d+)/i);
+            const auditorium = audMatch ? `Aud ${audMatch[1]}` : "TBD";
 
             const timeRx = /\b(\d{1,2}:\d{2}\s*[ap]m?)\b/gi;
             const foundTimes = blockText.match(timeRx);
@@ -87,6 +91,7 @@ async function scrapeShowtimes() {
                             movieId: cleanTitle.toLowerCase().replace(/[^a-z]/g,'') + '-' + idx++,
                             movie: cleanTitle,
                             theater: theaterName,
+                            auditorium: auditorium, // No longer undefined!
                             startTime: t,
                             endTime: minsToTime(start + 135),
                             endMins: start + 135
@@ -106,14 +111,12 @@ let cache = { date: 'April 20', showtimes: [] };
 
 async function refresh() {
     const data = await scrapeShowtimes();
-    if (data.length > 0) {
-        cache.showtimes = data;
-    }
+    if (data.length > 0) cache.showtimes = data;
 }
 
 refresh();
 setInterval(refresh, 20 * 60 * 1000);
 
 app.get('/showtimes', (req, res) => res.json({ ok: true, ...cache }));
-app.get('/', (req, res) => res.send(`Live: ${cache.showtimes.length} movies. Junk filtered.`));
+app.get('/', (req, res) => res.send(`Live: ${cache.showtimes.length} movies. Auditorium hunt active.`));
 app.listen(PORT);
